@@ -154,7 +154,6 @@ def eq_indices_selection(
         selected.append(rng.choice(members, 1, replace=replace)[0])
     return np.asarray(selected, dtype=int)
 
-
 def create_pairs(eq_indices: Sequence[int], struct_indices: Sequence[int], se_ratio: int = 1) -> np.ndarray:
     """
     Match structures and groundmotions together
