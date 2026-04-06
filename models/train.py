@@ -6,18 +6,17 @@ from typing import Dict
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import Model, regularizers
+from tensorflow.keras.optimizers import Adam, AdamW
 from tensorflow.keras import backend as K
 from tensorflow.keras.layers import Input, Dense, Flatten, Dropout, Concatenate, Reshape, LayerNormalization
 
 from utils.utils import make_nmse_scalar, make_nmse_per_output, nmse_dataset_vectorized
-
 
 def _make_slice_metric(nmse_scalar_fn, start: int, end: int, name: str):
     def metric(y_true, y_pred):
         return nmse_scalar_fn(y_true[:, start:end], y_pred[:, start:end])
     metric.__name__ = name
     return metric
-
 
 def _make_common_metrics(edp_train_samples: np.ndarray, all_edp: bool = True):
     train_var_scalar = float(np.var(edp_train_samples, ddof=0))
@@ -33,13 +32,11 @@ def _make_common_metrics(edp_train_samples: np.ndarray, all_edp: bool = True):
         ])
     return nmse_scalar, nmse_per_output, metric_list
 
-
 def _make_callbacks():
     return [
         tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=8, verbose=0),
         tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=50, restore_best_weights=True),
     ]
-
 
 def _evaluate_reconstruction_model(
     recon_model: Model,
@@ -62,13 +59,11 @@ def _evaluate_reconstruction_model(
     recon_val_loss = recon_model.evaluate([gm_val_samples, physical_samples_val], gm_val_samples, verbose=0)
     return recon_train_loss, recon_val_loss
 
-
 def _print_val_results(title: str, val_results: Dict[str, float]) -> None:
     print(f"\n=========== FINAL METRICS: {title} ===========")
     print("\n--- Validation set ---")
     for k, v in val_results.items():
         print(f"{k:30s}: {float(v):.6f}")
-
 
 def train_model(
     input_timesteps,
@@ -104,8 +99,11 @@ def train_model(
     latent = Dense(latent_dim, activation="gelu", name="latent")(x)
 
     dec = Dense(512, activation="relu", kernel_regularizer=regularizers.l2(5e-3))(latent)
+    x = Dropout(0.2)(x)
     dec = Dense(dim2, activation="relu", kernel_regularizer=regularizers.l2(5e-3))(dec)
+    x = Dropout(0.2)(x)
     dec = Dense(dim1, activation="relu", kernel_regularizer=regularizers.l2(5e-3))(dec)
+    x = Dropout(0.15)(x)
     dec = Dense(input_timesteps, activation="linear", kernel_regularizer=regularizers.l2(5e-3))(dec)
     reconstruction = Reshape((input_timesteps, ts_features), name="reconstruction")(dec)
 
@@ -133,7 +131,7 @@ def train_model(
         validation_data=([gm_val_samples, physical_samples_val], {"output": EDP_val_samples}),
         epochs=epochs,
         batch_size=batch_size,
-        callbacks=_make_callbacks(),
+        callbacks=_make_callbacks(), # This ensure avoiding the overfitting
         verbose=0,
         shuffle=True,
     )
@@ -144,18 +142,13 @@ def train_model(
         verbose=0,
         return_dict=True,
     )
-    _print_val_results("SA-PGA", val_results)
 
-    recon_train_loss, recon_val_loss = _evaluate_reconstruction_model(
+    # _print_val_results("SA-PGA", val_results)
+
+    _, recon_val_loss = _evaluate_reconstruction_model(
         recon_model, gm_train_samples, gm_val_samples, physical_samples_train, physical_samples_val
     )
-
-    print("\n=========== RECONSTRUCTION HEAD ===========")
-    print(f"Reconstruction train loss (NMSE): {recon_train_loss:.6f}")
-    print(f"Reconstruction val   loss (NMSE): {recon_val_loss:.6f}")
-
     return history, model, recon_model, val_results, recon_val_loss
-
 
 def train_model_PLE(
     input_timesteps,
@@ -209,7 +202,7 @@ def train_model_PLE(
         learning_rate=1e-4,
         global_clipnorm=5,
         use_ema=True,
-        weight_decay=1e-7,
+        weight_decay=1e-7, # further regularization to avoid overfitting
     )
 
     if all_edp:
@@ -234,18 +227,14 @@ def train_model_PLE(
         verbose=0,
         return_dict=True,
     )
-    _print_val_results("PLE", val_results)
 
-    recon_train_loss, recon_val_loss = _evaluate_reconstruction_model(
+    # _print_val_results("PLE", val_results)
+
+    _, recon_val_loss = _evaluate_reconstruction_model(
         recon_model, gm_train_samples, gm_val_samples, physical_samples_train, physical_samples_val
     )
 
-    print("\n=========== RECONSTRUCTION HEAD ===========")
-    print(f"Reconstruction train loss (NMSE): {recon_train_loss:.6f}")
-    print(f"Reconstruction val   loss (NMSE): {recon_val_loss:.6f}")
-
     return history, model, recon_model, val_results, recon_val_loss
-
 
 def train_model_SAE(
     input_timesteps,
@@ -271,48 +260,59 @@ def train_model_SAE(
     struct_input = Input(shape=(n_struct_features,), name="struct_input")
 
     x = Flatten()(ts_input)
-    x = Dropout(0.15)(x)
-    x = Dense(dim1, activation="relu", kernel_regularizer=regularizers.l2(5e-3))(x)
-    x = Dropout(0.2)(x)
-    x = Dense(dim2, activation="relu", kernel_regularizer=regularizers.l2(5e-3))(x)
-    x = Dropout(0.2)(x)
-    x = Dense(800, activation="relu", kernel_regularizer=regularizers.l2(5e-3))(x)
+    x = Dense(dim1, activation="relu")(x)
+    x = Dense(dim2, activation="relu")(x)
+    x = Dense(800, activation="relu", kernel_regularizer=regularizers.l2(5e-2))(x)
 
-    latent = Dense(latent_dim, activation="elu", name="latent")(x)
+    latent = Dense(latent_dim, activation="elu", name="latent", kernel_regularizer=regularizers.l2(5e-2))(x)
 
-    dec = Dense(800, activation="relu", kernel_regularizer=regularizers.l2(5e-3))(latent)
-    dec = Dense(dim2, activation="relu", kernel_regularizer=regularizers.l2(5e-3))(dec)
-    dec = Dense(dim1, activation="relu", kernel_regularizer=regularizers.l2(5e-3))(dec)
-    dec = Dense(input_timesteps, activation="linear", kernel_regularizer=regularizers.l2(5e-3))(dec)
+    dec = Dense(800, activation="relu", kernel_regularizer=regularizers.l2(5e-2))(latent)
+    dec = Dense(dim2, activation="relu")(dec)
+    dec = Dense(dim1, activation="relu")(dec)
+    dec = Dense(input_timesteps, activation="linear")(dec)
     reconstruction = Reshape((input_timesteps, ts_features), name="reconstruction")(dec)
 
     combined = Concatenate(name="combined")([latent, struct_input])
-    combined_mean = tf.reduce_mean(combined, axis=1, keepdims=True)
-    combined_std = tf.math.reduce_std(combined, axis=1, keepdims=True)
-    combined = (combined - combined_mean) / combined_std
-    reg = Dense(int(latent_dim), activation="selu", kernel_regularizer=regularizers.l2(1e-4))(combined)
-    reg = Dense(max(1, int(latent_dim / 2)), activation="selu")(reg)
-    output = Dense(n_floors, activation="linear", name="output")(reg)
+    reg = Dense(int(latent_dim), activation="elu", kernel_regularizer=regularizers.l2(1e-4))(combined)
+    reg = Dense(max(1, int(latent_dim / 2)), activation="elu", kernel_regularizer=regularizers.l2(1e-4))(reg)
+    output = Dense(n_floors, activation="linear", name="output", kernel_regularizer=regularizers.l2(1e-4))(reg)
 
     model = Model(inputs=[ts_input, struct_input], outputs=[reconstruction, output])
 
-    nmse_scalar, _, metric_list = _make_common_metrics(EDP_train_samples, all_edp=all_edp)
+    class NMSE(tf.keras.losses.Loss):
+        def __init__(self, var, eps=1e-8, name="nmse"):
+            super().__init__(name=name)
+            self.var = tf.constant(var, tf.float32)
+            self.eps = eps
+        def call(self, y_true, y_pred):
+            mse = tf.reduce_mean(tf.square(y_true - y_pred))
+            return mse / (self.var + self.eps)
 
-    opt = tf.keras.optimizers.Nadam(
-        learning_rate=tf.keras.optimizers.schedules.CosineDecay(
-            initial_learning_rate=3e-3, decay_steps=20000, alpha=3e-3
-        )
+    rec_var   = gm_train_samples.var()         # or feature-wise if you prefer
+    drift_var = EDP_train_samples.var()
+    #--------------------------------------
+    class NMSE_batch(tf.keras.losses.Loss):
+        def __init__(self, eps=1e-8, name="nmse_batch"):
+            super().__init__(name=name)
+            self.eps = eps
+        def call(self, y_true, y_pred):
+            mse = tf.reduce_mean(tf.square(y_true - y_pred))
+            variance_true = tf.reduce_mean(tf.square(y_true - tf.reduce_mean(y_true)))
+            return mse / (variance_true + self.eps)
+
+    model.compile(
+        optimizer=AdamW(1e-3),
+        loss={"reconstruction": NMSE_batch(), "output": NMSE(drift_var)},
+        loss_weights={"reconstruction": 0.5, "output": 0.5},
+        metrics=[NMSE_batch()]
     )
 
-    if all_edp:
-        model.compile(
-            optimizer=opt,
-            loss={"reconstruction": nmse_dataset_vectorized, "output": nmse_scalar},
-            loss_weights={"reconstruction": 0.5, "output": 0.5},
-            metrics={"reconstruction": [], "output": metric_list},
-        )
-    else:
-        model.compile(optimizer=opt, loss=nmse_scalar)
+    # Define early stopping
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss',        # Monitor validation loss
+        patience=25,               # Stop after 10 epochs with no improvement
+        restore_best_weights=True # Roll back to the best weights after stopping
+    )
 
     history = model.fit(
         x=[gm_train_samples, physical_samples_train],
@@ -323,9 +323,8 @@ def train_model_SAE(
         ),
         epochs=epochs,
         batch_size=batch_size,
-        callbacks=_make_callbacks(),
+        callbacks=[early_stopping],
         verbose=0,
-        shuffle=True,
     )
 
     val_results = model.evaluate(
@@ -334,16 +333,15 @@ def train_model_SAE(
         verbose=0,
         return_dict=True,
     )
-    _print_val_results("SAE", val_results)
+    # _print_val_results("SAE", val_results)
 
     return history, model, val_results
-
 
 def train_model_UAE(
     input_timesteps,
     ts_features,
     n_floors,
-    n_struct_features=9,
+    n_struct_features=8,
     latent_dim=2,
     gm_train_samples=None,
     physical_samples_train=None,
@@ -363,8 +361,8 @@ def train_model_UAE(
     x = Flatten()(ts_input)
     x = Dense(dim1, activation="relu")(x)
     x = Dense(dim2, activation="relu")(x)
-    x = Dense(800, activation="relu")(x)
-    latent = Dense(latent_dim, activation="gelu", name="latent")(x)
+    x = Dense(800, activation="relu", kernel_regularizer=regularizers.l2(1e-7))(x)
+    latent = Dense(latent_dim, activation="elu", name="latent")(x)
 
     dec = Dense(800, activation="relu")(latent)
     dec = Dense(dim2, activation="relu")(dec)
@@ -373,7 +371,13 @@ def train_model_UAE(
     reconstruction = Reshape((input_timesteps, ts_features), name="reconstruction")(dec)
 
     ae_model = Model(inputs=ts_input, outputs=reconstruction, name="uae_autoencoder")
-    ae_model.compile(optimizer="adam", loss=nmse_dataset_vectorized)
+    ae_model.compile(optimizer=AdamW(1e-3), loss=nmse_dataset_vectorized)
+
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss',        # Monitor validation loss
+    patience=25,               # Stop after 10 epochs with no improvement
+    restore_best_weights=True # Roll back to the best weights after stopping
+    )
 
     ae_model.fit(
         gm_train_samples,
@@ -381,7 +385,7 @@ def train_model_UAE(
         validation_data=(gm_val_samples, gm_val_samples),
         epochs=epochs,
         batch_size=batch_size,
-        callbacks=_make_callbacks(),
+        callbacks=[early_stopping],
         verbose=0,
         shuffle=True,
     )
@@ -391,21 +395,15 @@ def train_model_UAE(
     val_latent = latent_model.predict(gm_val_samples, verbose=0)
 
     reg_input = Input(shape=(latent_dim + n_struct_features,), name="uae_reg_input")
-    reg = LayerNormalization()(reg_input)
-    reg = Dense(max(4, latent_dim), activation="gelu")(reg)
-    reg = Dense(max(2, latent_dim // 2), activation="gelu")(reg)
+    reg = Dense(max(4, latent_dim), activation="relu", kernel_regularizer=regularizers.l2(0.0001))(reg_input)
+    reg = Dense(max(2, latent_dim // 2), activation="relu", kernel_regularizer=regularizers.l2(0.0001))(reg)
     reg_output = Dense(n_floors, activation="linear", name="output")(reg)
 
     reg_model = Model(inputs=reg_input, outputs=reg_output, name="uae_regressor")
 
     nmse_scalar, _, metric_list = _make_common_metrics(EDP_train_samples, all_edp=all_edp)
 
-    opt = tf.keras.optimizers.AdamW(
-        learning_rate=1e-4,
-        global_clipnorm=5,
-        use_ema=True,
-        weight_decay=1e-7,
-    )
+    opt = tf.keras.optimizers.AdamW(learning_rate=0.001)
 
     if all_edp:
         reg_model.compile(optimizer=opt, loss=nmse_scalar, metrics=metric_list)
@@ -415,23 +413,26 @@ def train_model_UAE(
     train_reg_input = np.concatenate((train_latent, physical_samples_train), axis=1)
     val_reg_input = np.concatenate((val_latent, physical_samples_val), axis=1)
 
+    # Early stopping
+    early_stop1 = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=15)
+
     history = reg_model.fit(
         train_reg_input,
         EDP_train_samples,
         validation_data=(val_reg_input, EDP_val_samples),
         epochs=epochs,
         batch_size=batch_size,
-        callbacks=_make_callbacks(),
+        callbacks=[early_stop1],
         verbose=0,
         shuffle=True,
     )
 
     values = reg_model.evaluate(val_reg_input, EDP_val_samples, verbose=0, return_dict=False)
     val_results = {name: float(val) for name, val in zip(reg_model.metrics_names, values)}
-    _print_val_results("UAE", val_results)
+    
+    # _print_val_results("UAE", val_results)
 
     return history, ae_model, latent_model, reg_model, val_results
-
 
 def train_by_variant(variant: str, **kwargs):
     variant_key = variant.upper()
