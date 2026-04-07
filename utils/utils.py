@@ -371,6 +371,80 @@ def load_base_input_data(base_path: str | Path) -> Tuple[np.ndarray, np.ndarray,
     rs_test_samples = load_split_npz(base_path, "RS_test", divide_by_981=True)
     return gm_test_samples, physical_samples_test, spectral_features_test_samples, rs_test_samples, pga_test, sa_t1_test
 
+def load_base_output_data(train_size=None, tag=None, base_path = None, samples_path =  None):
+    #-----------------------------------------------------------------------------------
+    peak_drift_per_floor_test = np.log(np.load(base_path + f"peak_drift_per_floor_test.npz")['data'])
+    y_true_EBF_drift = to_ebf(peak_drift_per_floor_test, order="eq_major")
+    # -----------------------------------------------------------------------------------
+    peak_accel_per_floor_train = np.log(np.load(samples_path + f"peak_accel_per_floor_train_{train_size}_{tag}.npz")['data']/9.81)
+    peak_accel_per_floor_test = np.log(np.load(base_path + f"peak_accel_per_floor_test.npz")['data']/9.81)
+    accel_min = np.min(peak_accel_per_floor_train, axis=0)
+    peak_accel_per_floor_test += accel_min
+    y_true_EBF_accel = to_ebf(peak_accel_per_floor_test, order="eq_major")
+    return (y_true_EBF_drift, y_true_EBF_accel, accel_min)
+
+def create_variant_input(variant='PLE', 
+                         physical_samples_test=None,
+                         spectral_features_test_samples=None,
+                         RS_test_samples = None):
+    pga_test = spectral_features_test_samples[:,0]
+    #----------------------------------------------
+    sa_T1_test = spectral_features_test_samples[:,2]
+    #---------------------------------------------
+    if variant == 'PLE' or variant == 'NH':
+        #------------------------------------
+        physical_samples_test = np.concatenate((physical_samples_test, 0.002*sa_T1_test.reshape(-1,1)), axis=1)
+        print(f'Test shape structural config is {physical_samples_test.shape}')
+        #------------------------------------
+        n_struct_features = 9 # number of structural features (physical data)
+
+    elif variant == "SA-PGA":
+        physical_samples_test = np.concatenate((physical_samples_test, sa_T1_test.reshape(-1,1), pga_test.reshape(-1,1)), axis=1)
+        print(f'Test shape structural config is {physical_samples_test.shape}')
+        #------------------------------------
+        n_struct_features = 10 # number of structural features (physical data)
+    elif variant == "SAE":
+        n_struct_features = 8
+    elif variant == "UAE":
+        n_struct_features = 9
+    return physical_samples_test, n_struct_features
+
+def perform_prediction(models_path = None, model_input=None, gm_test_samples=None, 
+                       RS_test_samples=None, variant = 'PLE', train_size=2720, latent=2, tag='10_1_r'):
+    if variant == 'UAE':
+        AE_UAE = tf.keras.models.load_model(models_path + f'\\{variant}_AE\\{variant}_{train_size}_{latent}_{tag}_AE', compile=False)
+        latent_model_UAE = Model(inputs=AE_UAE.input, outputs=AE_UAE.get_layer('latent').output)
+        extracted_features = latent_model_UAE.predict(gm_test_samples)
+        UAE_input = np.concatenate((extracted_features, model_input), axis=1)
+        
+        model_UAE = tf.keras.models.load_model(models_path + f'{variant}_{train_size}_{latent}_{tag}', compile=False)
+        pred = model_UAE.predict(UAE_input)
+        
+        
+    else:
+        model = tf.keras.models.load_model(
+            models_path + f'{variant}_{train_size}_{latent}_{tag}',
+            compile=False
+        )
+        # ---------- 3.4 Predict drift & accel for this training size ----------
+        pred = model.predict(
+            [gm_test_samples, model_input]
+        )
+    
+    
+
+    
+    try:
+        pred_drift = pred[:,0:5]
+        pred_accel = pred[:, 5:]
+    except:
+        #Only needed in the SAE case
+        pred_drift = pred[1][:,0:5]
+        pred_accel = pred[1][:, 5:]
+    
+    y_pred_EBF_drift = to_ebf(pred_drift, order="eq_major")
+    y_pred_EBF_accel = to_ebf(pred_accel, order="eq_major")
+    return y_pred_EBF_drift, y_pred_EBF_accel, pred_drift, pred_accel
 
 def prepare_training_data(base_path: str | Path, samples_path: str | Path, train_size: int, tag: str, variant: str) -> PreparedData:
     """
