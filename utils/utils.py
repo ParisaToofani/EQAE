@@ -393,10 +393,9 @@ def create_variant_input(variant='PLE',
     #---------------------------------------------
     if variant == 'PLE' or variant == 'NH':
         #------------------------------------
-        physical_samples_test = np.concatenate((physical_samples_test, 0.002*sa_T1_test.reshape(-1,1)), axis=1)
         print(f'Test shape structural config is {physical_samples_test.shape}')
         #------------------------------------
-        n_struct_features = 9 # number of structural features (physical data)
+        n_struct_features = 8 # number of structural features (physical data)
 
     elif variant == "SA-PGA":
         physical_samples_test = np.concatenate((physical_samples_test, sa_T1_test.reshape(-1,1), pga_test.reshape(-1,1)), axis=1)
@@ -406,7 +405,7 @@ def create_variant_input(variant='PLE',
     elif variant == "SAE":
         n_struct_features = 8
     elif variant == "UAE":
-        n_struct_features = 9
+        n_struct_features = 8
     return physical_samples_test, n_struct_features
 
 def perform_prediction(models_path = None, model_input=None, gm_test_samples=None, 
@@ -500,7 +499,7 @@ def prepare_training_data(base_path: str | Path, samples_path: str | Path, train
         physical_train = np.concatenate((physical_train, rs_train), axis=1)
         physical_test = np.concatenate((physical_test, rs_test), axis=1)
         physical_val = np.concatenate((physical_val, rs_val), axis=1)
-        n_struct_features = physical_train.shape[1]
+        n_struct_features = int(physical_train.shape[1] + rs_train.shape[1])
     elif variant == "SPEC-DR":
         n_struct_features = physical_train.shape[1]
     else:
